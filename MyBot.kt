@@ -189,18 +189,16 @@ class QLearner(
 
 fun toState(ship: Ship, gameMap: GameMap): State {
     val features = mutableListOf<Double>()
-    val mask = listOf(-4, -3, -2, -1, 0, 1, 2, 3, 4)
+    val mask = listOf(-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5)
 
     for (i in mask) {
         for (j in mask) {
             val position = ship.position.add(i, j)
             val mapCell = gameMap.at(position)
             val halite = (mapCell?.halite?.toDouble() ?: 0.0) / Constants.MAX_HALITE
-            val isOccupied = mapCell?.isOccupied ?: false
             val isDepositLoc = mapCell?.hasStructure() ?: false
 
             features.add(halite)
-            features.add(if (isOccupied) 1.0 else 0.0)
             features.add(if (isDepositLoc) 1.0 else 0.0)
         }
     }
@@ -248,7 +246,7 @@ object MyBot {
         val agentStatePath = Paths.get("q.txt")
         val actionValueFunction = LinearActionValueFunction(
                 random,
-                0.999,
+                0.9,
                 0.000001)
 
         if (Files.exists(agentStatePath)) {
@@ -283,7 +281,7 @@ object MyBot {
                 continue
             }
 
-            val currHalite = me.halite + ship.halite
+            val currHalite = me.halite
             val currState = toState(ship, gameMap)
             val currPossibleActions = toPossibleActions(ship, gameMap)
             val currAction = agent.chooseAction(currState, currPossibleActions)
