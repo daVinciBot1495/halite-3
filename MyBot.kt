@@ -5,37 +5,30 @@ import java.nio.file.Paths
 import java.util.Random
 import kotlin.collections.ArrayList
 
-data class Vector(val elements: List<Double>) {
-    fun scale(s: Double): Vector {
-        return Vector(this.elements.map { s * it })
-    }
-
-    fun add(v: Vector): Vector {
-        if (this.size() != v.size()) {
-            throw IllegalArgumentException("The vector sizes must be equal: ${this.size()} != ${v.size()}")
-        }
-        return Vector(this.elements.zip(v.elements).map { it.first + it.second })
-    }
-
-    fun dot(v: Vector): Double {
-        if (this.size() != v.size()) {
-            throw IllegalArgumentException("The vector sizes must be equal: ${this.size()} != ${v.size()}")
-        }
-        return this.elements.zip(v.elements).map { it.first * it.second }.reduce { a, b -> a + b }
-    }
+enum class HaliteLevel constructor(val charValue: Char) {
+    LOW('l'),
+    MED('m'),
+    HIGH('h');
 
     companion object {
-        fun random(n: Int, r: Random): Vector {
-            return Vector(DoubleArray(n, { r.nextDouble() }).toList())
-        }
-    }
+        fun fromHalite(halite: Int): HaliteLevel {
+            val validHalite = if (halite >= 0) halite else throw IllegalArgumentException("halite must be >= 0")
 
-    private fun size(): Int {
-        return this.elements.size
+            return if (validHalite < 333) {
+                HaliteLevel.LOW
+            } else if (validHalite < 666) {
+                HaliteLevel.MED
+            } else {
+                HaliteLevel.HIGH
+            }
+        }
     }
 }
 
-data class State(val features: Vector)
+data class State(
+        val maxHaliteDirection: Direction,
+        val nearestDropOffDirection: Direction,
+        val haliteLevel: HaliteLevel)
 
 sealed class Action {
     companion object {
@@ -50,9 +43,9 @@ sealed class Action {
 
 data class Move(val direction: Direction) : Action()
 
-interface ActionValueFunction {
-    fun evaluate(state: State, action: Action): Double
+data class StateAction(val state: State, val action: Action)
 
+interface ActionValueFunction {
     fun max(state: State, possibleActions: Set<Action>): Action
 
     fun update(state: State, action: Action, reward: Double, nextState: State, possibleNextActions: Set<Action>)
@@ -62,19 +55,14 @@ interface ActionValueFunction {
     fun loadState(path: Path)
 }
 
-class LinearActionValueFunction(
-        private val random: Random,
+class TableActionValueFunction(
         private val discountRate: Double,
         private val learningRate: Double,
-        private val actionParamsMap: MutableMap<Action, Vector> = mutableMapOf()) :
+        private val stateActionValueMap: MutableMap<StateAction, Double> = mutableMapOf()) :
         ActionValueFunction {
-    override fun evaluate(state: State, action: Action): Double {
-        return getParams(state, action).dot(state.features)
-    }
-
     override fun max(state: State, possibleActions: Set<Action>): Action {
         if (possibleActions.isNotEmpty()) {
-            val actionValues = possibleActions.map { Pair(it, evaluate(state, it)) }
+            val actionValues = possibleActions.map { Pair(it, getValue(state, it)) }
             return actionValues.maxBy { it.second }?.first!!
         } else {
             throw IllegalArgumentException("possibleActions cannot be empty")
@@ -87,23 +75,19 @@ class LinearActionValueFunction(
             reward: Double,
             nextState: State,
             possibleNextActions: Set<Action>) {
-        val params = getParams(state, action)
-        val actionVal = evaluate(state, action)
+        val stateActionVal = getValue(state, action)
         val nextAction = max(nextState, possibleNextActions)
-        val nextActionVal = evaluate(nextState, nextAction)
-        val temporalDiff = reward + discountRate * nextActionVal - actionVal
-        val newParams = params.add(state.features.scale(learningRate * temporalDiff))
+        val nextStateActionVal = getValue(nextState, nextAction)
+        val temporalDiff = reward + discountRate * nextStateActionVal - stateActionVal
 
-        actionParamsMap[action] = newParams
+        setValue(state, action, stateActionVal + learningRate * temporalDiff)
     }
 
     override fun saveState(path: Path) {
-        val text = actionParamsMap.map { (action, vector) ->
-            val valuesStr = vector.elements.map { it.toString() }.joinToString(",")
-            val keyStr = when (action) {
-                is Move -> action.direction.charValue
-            }
-            "$keyStr:$valuesStr"
+        val text = stateActionValueMap.map { (stateAction, value) ->
+            val keyStr = stateActionToStr(stateAction)
+            val valueStr = value.toString()
+            "$keyStr:$valueStr"
         }.joinToString(separator = "\n")
         path.toFile().writeText(text)
     }
@@ -115,19 +99,42 @@ class LinearActionValueFunction(
             if (trimmedLine.isNotEmpty()) {
                 val tokens = trimmedLine.split(":")
                 val keyStr = tokens[0]
-                val valuesStr = tokens[1]
-                val action = Move(toDirection(keyStr[0]))
-                val values = Vector(valuesStr.split(",").map { valStr -> valStr.toDouble() })
+                val valueStr = tokens[1]
+                val stateActionPair = toStateAction(keyStr)
+                val value = valueStr.toDouble()
 
-                actionParamsMap[action] = values
+                stateActionValueMap[stateActionPair] = value
             }
         }
     }
 
-    private fun getParams(state: State, action: Action): Vector {
-        return actionParamsMap.computeIfAbsent(action, { _ ->
-            Vector.random(state.features.elements.size, random)
-        })
+    private fun getValue(state: State, action: Action): Double {
+        val stateActionPair = StateAction(state, action)
+        return stateActionValueMap.getOrDefault(stateActionPair, 0.0)
+    }
+
+    private fun setValue(state: State, action: Action, value: Double) {
+        val stateActionPair = StateAction(state, action)
+        stateActionValueMap[stateActionPair] = value
+    }
+
+    private fun stateActionToStr(stateAction: StateAction): String {
+        val state = stateAction.state
+        val maxHaliteDirectionStr = state.maxHaliteDirection.charValue
+        val nearestDropOffDirectionStr = state.nearestDropOffDirection.charValue
+        val haliteLevelStr = state.haliteLevel.charValue
+        val action = stateAction.action
+        val actionStr = when (action) {
+            is Move -> action.direction.charValue
+        }
+
+        return "$maxHaliteDirectionStr$nearestDropOffDirectionStr$haliteLevelStr$actionStr"
+    }
+
+    private fun toStateAction(str: String): StateAction {
+        val state = State(toDirection(str[0]), toDirection(str[1]), toHaliteLevel(str[2]))
+        val action = Move(toDirection(str[3]))
+        return StateAction(state, action)
     }
 
     private fun toDirection(c: Char): Direction {
@@ -138,6 +145,15 @@ class LinearActionValueFunction(
             Direction.EAST.charValue -> Direction.EAST
             Direction.WEST.charValue -> Direction.WEST
             else -> throw IllegalArgumentException("$c is not a valid Direction")
+        }
+    }
+
+    private fun toHaliteLevel(c: Char): HaliteLevel {
+        return when (c) {
+            HaliteLevel.LOW.charValue -> HaliteLevel.LOW
+            HaliteLevel.MED.charValue -> HaliteLevel.MED
+            HaliteLevel.HIGH.charValue -> HaliteLevel.HIGH
+            else -> throw IllegalArgumentException("$c is not a valid HaliteLevel")
         }
     }
 }
@@ -187,36 +203,24 @@ class QLearner(
     }
 }
 
-fun toState(ship: Ship, gameMap: GameMap): State {
-    val features = mutableListOf<Double>()
-    val mask = listOf(-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5)
-
-    for (i in mask) {
-        for (j in mask) {
-            val position = ship.position.add(i, j)
-            val mapCell = gameMap.at(position)
-            val halite = (mapCell?.halite?.toDouble() ?: 0.0) / Constants.MAX_HALITE
-            val isDepositLoc = mapCell?.hasStructure() ?: false
-
-            features.add(halite)
-            features.add(if (isDepositLoc) 1.0 else 0.0)
-        }
+fun toState(ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
+    val directionHalitePairs = Direction.ALL_CARDINALS.map {
+        val position = ship.position.directionalOffset(it)
+        val mapCell = gameMap.at(position)
+        val halite = (mapCell?.halite?.toDouble() ?: 0.0)
+        Pair(it, halite)
     }
+    val maxHaliteDirection = directionHalitePairs.maxBy { it.second }?.first!!
+    val shipyardDirections = gameMap.getUnsafeMoves(ship.position, shipyard.position)
+    val nearestDropOffDirection = if (shipyardDirections.isEmpty()) Direction.STILL else shipyardDirections.first()
 
-    features.add(ship.halite.toDouble() / Constants.MAX_HALITE)
-    features.add(1.0)
-
-    return State(Vector(features))
+    return State(maxHaliteDirection, nearestDropOffDirection, HaliteLevel.fromHalite(ship.halite))
 }
 
 fun toCommand(ship: Ship, action: Action): Command {
     return when (action) {
         is Move -> ship.move(action.direction)
     }
-}
-
-fun Position.add(x: Int, y: Int): Position {
-    return Position(this.x + x, this.y + y)
 }
 
 fun toPossibleActions(ship: Ship, gameMap: GameMap): Set<Action> {
@@ -244,10 +248,7 @@ object MyBot {
         // This is a good place to do computationally expensive start-up pre-processing.
         // As soon as you call "ready" function below, the 2 second per turn timer will start.
         val agentStatePath = Paths.get("q.txt")
-        val actionValueFunction = LinearActionValueFunction(
-                random,
-                0.9,
-                0.000001)
+        val actionValueFunction = TableActionValueFunction(0.9,0.001)
 
         if (Files.exists(agentStatePath)) {
             Log.log("Loading agent state from ${agentStatePath.fileName}")
@@ -270,6 +271,8 @@ object MyBot {
             val gameMap = game.gameMap
             val commandQueue = ArrayList<Command>()
 
+            me.shipyard
+
             //----------------------------------------------------------------------------------------------------------
             // Start Reinforcement Learning
             //----------------------------------------------------------------------------------------------------------
@@ -282,7 +285,7 @@ object MyBot {
             }
 
             val currHalite = me.halite
-            val currState = toState(ship, gameMap)
+            val currState = toState(ship, me.shipyard, gameMap)
             val currPossibleActions = toPossibleActions(ship, gameMap)
             val currAction = agent.chooseAction(currState, currPossibleActions)
 
