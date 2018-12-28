@@ -255,7 +255,7 @@ object MyBot {
             actionValueFunction.loadState(agentStatePath)
         }
 
-        val agent = QLearner(random, 0.05, actionValueFunction)
+        val agent = QLearner(random, 0.30, actionValueFunction)
         var prevState: State? = null
         var prevAction = Action.STILL
         var prevHalite = 0
@@ -292,7 +292,7 @@ object MyBot {
             Log.log("Taking action=$currAction")
 
             if (prevState != null) {
-                val reward = currHalite - prevHalite
+                val reward = currHalite - prevHalite - 1
                 agent.learn(prevState, prevAction, reward.toDouble(), currState, currPossibleActions)
                 Log.log("reward=$reward")
             }
