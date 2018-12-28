@@ -5,6 +5,8 @@ import java.nio.file.Paths
 import java.util.Random
 import kotlin.collections.ArrayList
 
+const val RADIUS = 5
+
 enum class HaliteLevel constructor(val charValue: Char) {
     LOW('l'),
     MED('m'),
@@ -14,21 +16,37 @@ enum class HaliteLevel constructor(val charValue: Char) {
         fun fromHalite(halite: Int): HaliteLevel {
             val validHalite = if (halite >= 0) halite else throw IllegalArgumentException("halite must be >= 0")
 
-            return if (validHalite < 333) {
-                HaliteLevel.LOW
-            } else if (validHalite < 666) {
-                HaliteLevel.MED
+            return if (validHalite < 200) {
+                LOW
+            } else if (validHalite < 400) {
+                MED
             } else {
-                HaliteLevel.HIGH
+                HIGH
+            }
+        }
+    }
+}
+
+enum class DropOffProximity constructor(val charValue: Char) {
+    CLOSE('c'),
+    FAR('f');
+
+    companion object {
+        fun fromDistance(distance: Int): DropOffProximity {
+            return if (distance <= 5) {
+                CLOSE
+            } else {
+                FAR
             }
         }
     }
 }
 
 data class State(
-        val maxHaliteDirection: Direction,
+        val directionHaliteLevels: List<HaliteLevel>,
         val nearestDropOffDirection: Direction,
-        val haliteLevel: HaliteLevel)
+        val nearestDropOffProximity: DropOffProximity,
+        val shipHaliteLevel: HaliteLevel)
 
 sealed class Action {
     companion object {
@@ -48,7 +66,13 @@ data class StateAction(val state: State, val action: Action)
 interface ActionValueFunction {
     fun max(state: State, possibleActions: Set<Action>): Action
 
-    fun update(state: State, action: Action, reward: Double, nextState: State, possibleNextActions: Set<Action>)
+    fun update(
+            state: State,
+            action: Action,
+            reward: Double,
+            nextState: State,
+            nextAction: Action,
+            possibleNextActions: Set<Action>)
 
     fun saveState(path: Path)
 
@@ -58,7 +82,10 @@ interface ActionValueFunction {
 class TableActionValueFunction(
         private val discountRate: Double,
         private val learningRate: Double,
-        private val stateActionValueMap: MutableMap<StateAction, Double> = mutableMapOf()) :
+        private val traceDecayRate: Double,
+        private val stateActionValueMap: MutableMap<StateAction, Double> = mutableMapOf(),
+        private val stateActionTraceMap: MutableMap<StateAction, Double> = mutableMapOf(),
+        private val episode: MutableSet<StateAction> = mutableSetOf()) :
         ActionValueFunction {
     override fun max(state: State, possibleActions: Set<Action>): Action {
         if (possibleActions.isNotEmpty()) {
@@ -74,13 +101,38 @@ class TableActionValueFunction(
             action: Action,
             reward: Double,
             nextState: State,
+            nextAction: Action,
             possibleNextActions: Set<Action>) {
         val stateActionVal = getValue(state, action)
-        val nextAction = max(nextState, possibleNextActions)
-        val nextStateActionVal = getValue(nextState, nextAction)
-        val temporalDiff = reward + discountRate * nextStateActionVal - stateActionVal
+        val nextOptimalAction = max(nextState, possibleNextActions)
+        val nextOptimalStateActionVal = getValue(nextState, nextOptimalAction)
+        val temporalDiff = reward + discountRate * nextOptimalStateActionVal - stateActionVal
 
-        setValue(state, action, stateActionVal + learningRate * temporalDiff)
+        Log.log("s=$state, a=$action, r=$reward, s'=$nextState, a'=$nextAction, a*=$nextOptimalAction")
+
+        setTrace(state, action, getTrace(state, action) + 1.0)
+
+        episode.add(StateAction(state, action))
+        episode.forEach {
+            val oldVal = getValue(it.state, it.action)
+            val oldTrace = getTrace(it.state, it.action)
+            val newVal = oldVal + learningRate * temporalDiff * oldTrace
+            val newTrace = if (nextAction == nextOptimalAction) {
+                discountRate * traceDecayRate * oldTrace
+            } else {
+                0.0
+            }
+
+            Log.log("Updating: s=${it.state}, a=${it.action}, oldVal=$oldVal, newVal=$newVal")
+
+            setValue(it.state, it.action, newVal)
+            setTrace(it.state, it.action, newTrace)
+        }
+
+        if (reward >= 0) {
+            episode.forEach { setTrace(it.state, it.action, 0.0) }
+            episode.clear()
+        }
     }
 
     override fun saveState(path: Path) {
@@ -118,22 +170,46 @@ class TableActionValueFunction(
         stateActionValueMap[stateActionPair] = value
     }
 
+    private fun getTrace(state: State, action: Action): Double {
+        val stateActionPair = StateAction(state, action)
+        return stateActionTraceMap.getOrDefault(stateActionPair, 0.0)
+    }
+
+    private fun setTrace(state: State, action: Action, value: Double) {
+        val stateActionPair = StateAction(state, action)
+        stateActionTraceMap[stateActionPair] = value
+    }
+
     private fun stateActionToStr(stateAction: StateAction): String {
         val state = stateAction.state
-        val maxHaliteDirectionStr = state.maxHaliteDirection.charValue
+        val directionHaliteLevelsStr = directionHaliteLevelsToStr(state.directionHaliteLevels)
         val nearestDropOffDirectionStr = state.nearestDropOffDirection.charValue
-        val haliteLevelStr = state.haliteLevel.charValue
+        val nearestDropOffProximityStr = state.nearestDropOffProximity.charValue
+        val shipHaliteLevelStr = state.shipHaliteLevel.charValue
         val action = stateAction.action
         val actionStr = when (action) {
             is Move -> action.direction.charValue
         }
 
-        return "$maxHaliteDirectionStr$nearestDropOffDirectionStr$haliteLevelStr$actionStr"
+        return "$directionHaliteLevelsStr$nearestDropOffDirectionStr$nearestDropOffProximityStr$shipHaliteLevelStr$actionStr"
+    }
+
+    private fun directionHaliteLevelsToStr(directionHaliteLevels: List<HaliteLevel>): String {
+        return directionHaliteLevels.map { it.charValue }.joinToString(separator = "")
     }
 
     private fun toStateAction(str: String): StateAction {
-        val state = State(toDirection(str[0]), toDirection(str[1]), toHaliteLevel(str[2]))
-        val action = Move(toDirection(str[3]))
+        val directionHaliteLevels = listOf(
+                toHaliteLevel(str[0]),
+                toHaliteLevel(str[1]),
+                toHaliteLevel(str[2]),
+                toHaliteLevel(str[3]),
+                toHaliteLevel(str[4]))
+        val nearestDropOffDirection = toDirection(str[5])
+        val nearestDropOffProximity = toDropOffProximity(str[6])
+        val shipHaliteLevel = toHaliteLevel(str[7])
+        val state = State(directionHaliteLevels, nearestDropOffDirection, nearestDropOffProximity, shipHaliteLevel)
+        val action = Move(toDirection(str[8]))
         return StateAction(state, action)
     }
 
@@ -156,12 +232,26 @@ class TableActionValueFunction(
             else -> throw IllegalArgumentException("$c is not a valid HaliteLevel")
         }
     }
+
+    private fun toDropOffProximity(c: Char): DropOffProximity {
+        return when (c) {
+            DropOffProximity.CLOSE.charValue -> DropOffProximity.CLOSE
+            DropOffProximity.FAR.charValue -> DropOffProximity.FAR
+            else -> throw IllegalArgumentException("$c is not a valid DropOffProximity")
+        }
+    }
 }
 
 interface ReinforcementLearner {
     fun chooseAction(currState: State, possibleNextActions: Set<Action>): Action
 
-    fun learn(currState: State, action: Action, reward: Double, nextState: State, possibleNextActions: Set<Action>)
+    fun learn(
+            currState: State,
+            action: Action,
+            reward: Double,
+            nextState: State,
+            nextAction: Action,
+            possibleNextActions: Set<Action>)
 
     fun saveState(path: Path)
 
@@ -178,7 +268,6 @@ class QLearner(
         }
 
         return if (random.nextDouble() < explorationRate) {
-            Log.log("Taking exploratory action")
             Action.ALL_ACTIONS.toList()[random.nextInt(Action.ALL_ACTIONS.size)]
         } else {
             actionValueFunction.max(currState, possibleNextActions)
@@ -190,8 +279,9 @@ class QLearner(
             action: Action,
             reward: Double,
             nextState: State,
+            nextAction: Action,
             possibleNextActions: Set<Action>) {
-        actionValueFunction.update(currState, action, reward, nextState, possibleNextActions)
+        actionValueFunction.update(currState, action, reward, nextState, nextAction, possibleNextActions)
     }
 
     override fun saveState(path: Path) {
@@ -203,18 +293,68 @@ class QLearner(
     }
 }
 
-fun toState(ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
-    val directionHalitePairs = Direction.ALL_CARDINALS.map {
-        val position = ship.position.directionalOffset(it)
-        val mapCell = gameMap.at(position)
-        val halite = (mapCell?.halite?.toDouble() ?: 0.0)
-        Pair(it, halite)
+fun Position.directionalOffset(d: Direction, scale: Int): Position {
+    val dx: Int
+    val dy: Int
+
+    when (d) {
+        Direction.NORTH -> {
+            dx = 0
+            dy = -scale
+        }
+        Direction.SOUTH -> {
+            dx = 0
+            dy = scale
+        }
+        Direction.EAST -> {
+            dx = scale
+            dy = 0
+        }
+        Direction.WEST -> {
+            dx = -scale
+            dy = 0
+        }
+        Direction.STILL -> {
+            dx = 0
+            dy = 0
+        }
     }
-    val maxHaliteDirection = directionHalitePairs.maxBy { it.second }?.first!!
+
+    return Position(x + dx, y + dy)
+}
+
+fun toState(ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
+    val directions = listOf(Direction.STILL, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)
+    val directionHaliteLevels = directions.map {
+        var num = 0.0
+        var denom = 0.0
+
+        if (it == Direction.STILL) {
+            val mapCell = gameMap.at(ship)
+            num += mapCell?.halite?.toDouble() ?: 0.0
+            denom += 1.0
+        } else {
+            for (scale in 1..RADIUS) {
+                val position = ship.position.directionalOffset(it, scale)
+                val mapCell = gameMap.at(position)
+                val weight = RADIUS - scale + 1.0
+                num += weight * (mapCell?.halite?.toDouble() ?: 0.0)
+                denom += weight
+            }
+        }
+
+        val directionHalite = (num / denom).toInt()
+        val directionHaliteLevel = HaliteLevel.fromHalite(directionHalite)
+
+        directionHaliteLevel
+    }
     val shipyardDirections = gameMap.getUnsafeMoves(ship.position, shipyard.position)
     val nearestDropOffDirection = if (shipyardDirections.isEmpty()) Direction.STILL else shipyardDirections.first()
+    val nearestDropOffDistance = gameMap.calculateDistance(ship.position, shipyard.position)
+    val nearestDropOffProximity = DropOffProximity.fromDistance(nearestDropOffDistance)
+    val shipHaliteLevel = HaliteLevel.fromHalite(ship.halite)
 
-    return State(maxHaliteDirection, nearestDropOffDirection, HaliteLevel.fromHalite(ship.halite))
+    return State(directionHaliteLevels, nearestDropOffDirection, nearestDropOffProximity, shipHaliteLevel)
 }
 
 fun toCommand(ship: Ship, action: Action): Command {
@@ -223,16 +363,16 @@ fun toCommand(ship: Ship, action: Action): Command {
     }
 }
 
-fun toPossibleActions(ship: Ship, gameMap: GameMap): Set<Action> {
+fun toPossibleActions(ship: Ship, shipyard: Shipyard, gameMap: GameMap): Set<Action> {
     val mapCell = gameMap.at(ship.position)
     val cellHalite = mapCell?.halite?.toDouble() ?: 0.0
 
-    return if (ship.isFull) {
-        setOf(Action.NORTH, Action.SOUTH, Action.EAST, Action.WEST)
-    } else if (ship.halite > cellHalite / 10) {
-        Action.ALL_ACTIONS
-    } else {
+    return if (ship.halite < cellHalite / 10) {
         setOf(Action.STILL)
+    } else if (ship.position == shipyard.position) {
+        setOf(Action.NORTH, Action.SOUTH, Action.EAST, Action.WEST)
+    } else {
+        Action.ALL_ACTIONS
     }
 }
 
@@ -248,14 +388,14 @@ object MyBot {
         // This is a good place to do computationally expensive start-up pre-processing.
         // As soon as you call "ready" function below, the 2 second per turn timer will start.
         val agentStatePath = Paths.get("q.txt")
-        val actionValueFunction = TableActionValueFunction(0.9,0.001)
+        val actionValueFunction = TableActionValueFunction(0.9,0.01, 0.9)
 
         if (Files.exists(agentStatePath)) {
             Log.log("Loading agent state from ${agentStatePath.fileName}")
             actionValueFunction.loadState(agentStatePath)
         }
 
-        val agent = QLearner(random, 0.30, actionValueFunction)
+        val agent = QLearner(random, 0.05, actionValueFunction)
         var prevState: State? = null
         var prevAction = Action.STILL
         var prevHalite = 0
@@ -286,15 +426,12 @@ object MyBot {
 
             val currHalite = me.halite
             val currState = toState(ship, me.shipyard, gameMap)
-            val currPossibleActions = toPossibleActions(ship, gameMap)
+            val currPossibleActions = toPossibleActions(ship, me.shipyard, gameMap)
             val currAction = agent.chooseAction(currState, currPossibleActions)
-
-            Log.log("Taking action=$currAction")
 
             if (prevState != null) {
                 val reward = currHalite - prevHalite - 1
-                agent.learn(prevState, prevAction, reward.toDouble(), currState, currPossibleActions)
-                Log.log("reward=$reward")
+                agent.learn(prevState, prevAction, reward.toDouble(), currState, currAction, currPossibleActions)
             }
 
             prevState = currState
@@ -303,7 +440,7 @@ object MyBot {
 
             commandQueue.add(toCommand(ship, currAction))
 
-            if (saveState) {
+            if (saveState && Constants.MAX_TURNS == game.turnNumber) {
                 Log.log("Saving state to ${agentStatePath.fileName}")
                 agent.saveState(agentStatePath)
             } else {
