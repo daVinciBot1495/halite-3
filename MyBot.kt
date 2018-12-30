@@ -5,48 +5,80 @@ import java.nio.file.Paths
 import java.util.Random
 import kotlin.collections.ArrayList
 
-const val RADIUS = 5
+val twoByTwoTiles = listOf(
+        Tile("2.2.NW", TileRange(-1, 0), TileRange(-1,0)),
+        Tile("2.2.NE", TileRange(0, 1), TileRange(-1, 0)),
+        Tile("2.2.SE", TileRange(0, 1), TileRange(0, 1)),
+        Tile("2.2.SW", TileRange(-1, 0), TileRange(0, 1)))
 
-enum class HaliteLevel constructor(val charValue: Char) {
-    LOW('l'),
-    MED('m'),
-    HIGH('h');
-
-    companion object {
-        fun fromHalite(halite: Int): HaliteLevel {
-            val validHalite = if (halite >= 0) halite else throw IllegalArgumentException("halite must be >= 0")
-
-            return if (validHalite < 200) {
-                LOW
-            } else if (validHalite < 400) {
-                MED
-            } else {
-                HIGH
-            }
+data class TileRange(val start: Int, val end: Int) {
+    init {
+        if (end < start) {
+            throw IllegalArgumentException("start must be <= end")
         }
     }
 }
 
-enum class DropOffProximity constructor(val charValue: Char) {
-    CLOSE('c'),
-    FAR('f');
+data class Tile(val id: String, val xRange: TileRange, val yRange: TileRange) {
+    init {
+        if (id.isBlank()) {
+            throw IllegalArgumentException("id cannot be blank")
+        }
+    }
+
+    fun getPositionsForAnchor(anchor: Position): List<Position> {
+        val positions = mutableListOf<Position>()
+
+        for (i in xRange.start..xRange.end) {
+            for (j in yRange.start..yRange.end) {
+                positions.add(add(anchor, i, j))
+            }
+        }
+
+        return positions
+    }
+
+    private fun add(position: Position, x: Int, y: Int): Position {
+        return Position(position.x + x, position.y + y)
+    }
+}
+
+data class RankedTile(val rank: Int, val tile: Tile) {
+    init {
+        if (rank < 0) {
+            throw IllegalArgumentException("rank must be >= 0")
+        }
+    }
+}
+
+data class HaliteLevel(val rank: Int) {
+    init {
+        if (rank < 0 || rank > THRESHOLDS.size) {
+            throw IllegalArgumentException("rank=$rank must be >= 0 and <= ${THRESHOLDS.size}")
+        }
+    }
 
     companion object {
-        fun fromDistance(distance: Int): DropOffProximity {
-            return if (distance <= 5) {
-                CLOSE
+        private val THRESHOLDS = listOf(8, 16, 32, 64, 128, 256, 512)
+
+        fun fromHalite(halite: Int): HaliteLevel {
+            val index = THRESHOLDS.binarySearch(halite)
+
+            return if (index >= 0) {
+                HaliteLevel(index)
             } else {
-                FAR
+                val insertionPoint = -(index + 1)
+                HaliteLevel(insertionPoint)
             }
         }
     }
 }
 
 data class State(
-        val directionHaliteLevels: List<HaliteLevel>,
+        val twoByTwoRankedTiles: List<RankedTile>,
         val nearestDropOffDirection: Direction,
-        val nearestDropOffProximity: DropOffProximity,
-        val shipHaliteLevel: HaliteLevel)
+        val shipHaliteLevel: HaliteLevel,
+        val cellHaliteLevel: HaliteLevel)
 
 sealed class Action {
     companion object {
@@ -129,7 +161,8 @@ class TableActionValueFunction(
             setTrace(it.state, it.action, newTrace)
         }
 
-        if (reward >= 0) {
+        if (reward != 0.0) {
+            Log.log("Clearing episode due to non-zero reward=$reward")
             episode.forEach { setTrace(it.state, it.action, 0.0) }
             episode.clear()
         }
@@ -182,34 +215,30 @@ class TableActionValueFunction(
 
     private fun stateActionToStr(stateAction: StateAction): String {
         val state = stateAction.state
-        val directionHaliteLevelsStr = directionHaliteLevelsToStr(state.directionHaliteLevels)
+        val twoByTwoRankedTilesStr = rankedTilesToStr(state.twoByTwoRankedTiles)
         val nearestDropOffDirectionStr = state.nearestDropOffDirection.charValue
-        val nearestDropOffProximityStr = state.nearestDropOffProximity.charValue
-        val shipHaliteLevelStr = state.shipHaliteLevel.charValue
+        val shipHaliteLevelStr = state.shipHaliteLevel.rank.toString()
+        val cellHaliteLevelStr = state.cellHaliteLevel.rank.toString()
         val action = stateAction.action
         val actionStr = when (action) {
             is Move -> action.direction.charValue
         }
 
-        return "$directionHaliteLevelsStr$nearestDropOffDirectionStr$nearestDropOffProximityStr$shipHaliteLevelStr$actionStr"
+        return "$twoByTwoRankedTilesStr$nearestDropOffDirectionStr$shipHaliteLevelStr$cellHaliteLevelStr$actionStr"
     }
 
-    private fun directionHaliteLevelsToStr(directionHaliteLevels: List<HaliteLevel>): String {
-        return directionHaliteLevels.map { it.charValue }.joinToString(separator = "")
+    private fun rankedTilesToStr(rankedTiles: List<RankedTile>): String {
+        return rankedTiles.map { it.rank }.joinToString(separator = "")
     }
 
     private fun toStateAction(str: String): StateAction {
-        val directionHaliteLevels = listOf(
-                toHaliteLevel(str[0]),
-                toHaliteLevel(str[1]),
-                toHaliteLevel(str[2]),
-                toHaliteLevel(str[3]),
-                toHaliteLevel(str[4]))
-        val nearestDropOffDirection = toDirection(str[5])
-        val nearestDropOffProximity = toDropOffProximity(str[6])
-        val shipHaliteLevel = toHaliteLevel(str[7])
-        val state = State(directionHaliteLevels, nearestDropOffDirection, nearestDropOffProximity, shipHaliteLevel)
-        val action = Move(toDirection(str[8]))
+        var index = 0
+        val twoByTwoRankedTiles = twoByTwoTiles.map { RankedTile(str[index++].toString().toInt(), it) }
+        val nearestDropOffDirection = toDirection(str[index++])
+        val shipHaliteLevel = HaliteLevel(str[index++].toString().toInt())
+        val cellHaliteLevel = HaliteLevel(str[index++].toString().toInt())
+        val state = State(twoByTwoRankedTiles, nearestDropOffDirection, shipHaliteLevel, cellHaliteLevel)
+        val action = Move(toDirection(str[index++]))
         return StateAction(state, action)
     }
 
@@ -221,23 +250,6 @@ class TableActionValueFunction(
             Direction.EAST.charValue -> Direction.EAST
             Direction.WEST.charValue -> Direction.WEST
             else -> throw IllegalArgumentException("$c is not a valid Direction")
-        }
-    }
-
-    private fun toHaliteLevel(c: Char): HaliteLevel {
-        return when (c) {
-            HaliteLevel.LOW.charValue -> HaliteLevel.LOW
-            HaliteLevel.MED.charValue -> HaliteLevel.MED
-            HaliteLevel.HIGH.charValue -> HaliteLevel.HIGH
-            else -> throw IllegalArgumentException("$c is not a valid HaliteLevel")
-        }
-    }
-
-    private fun toDropOffProximity(c: Char): DropOffProximity {
-        return when (c) {
-            DropOffProximity.CLOSE.charValue -> DropOffProximity.CLOSE
-            DropOffProximity.FAR.charValue -> DropOffProximity.FAR
-            else -> throw IllegalArgumentException("$c is not a valid DropOffProximity")
         }
     }
 }
@@ -293,68 +305,24 @@ class QLearner(
     }
 }
 
-fun Position.directionalOffset(d: Direction, scale: Int): Position {
-    val dx: Int
-    val dy: Int
-
-    when (d) {
-        Direction.NORTH -> {
-            dx = 0
-            dy = -scale
-        }
-        Direction.SOUTH -> {
-            dx = 0
-            dy = scale
-        }
-        Direction.EAST -> {
-            dx = scale
-            dy = 0
-        }
-        Direction.WEST -> {
-            dx = -scale
-            dy = 0
-        }
-        Direction.STILL -> {
-            dx = 0
-            dy = 0
-        }
-    }
-
-    return Position(x + dx, y + dy)
-}
-
 fun toState(ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
-    val directions = listOf(Direction.STILL, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)
-    val directionHaliteLevels = directions.map {
-        var num = 0.0
-        var denom = 0.0
+    val twoByTwoTileHaliteAvgs = twoByTwoTiles.map { tile ->
+        val positions = tile.getPositionsForAnchor(ship.position)
+        val haliteSum = positions.sumBy { gameMap.at(it)?.halite ?: 0 }
+        Pair(tile, haliteSum.toDouble() / positions.size)
+    }.toMutableList()
+    twoByTwoTileHaliteAvgs.sortBy { it.second }
+    val tileToRankMap = twoByTwoTileHaliteAvgs.mapIndexed { index, pair ->  pair.first to index }.toMap()
+    val twoByTwoRankedTiles = twoByTwoTiles.map { RankedTile(tileToRankMap[it]!!, it) }
 
-        if (it == Direction.STILL) {
-            val mapCell = gameMap.at(ship)
-            num += mapCell?.halite?.toDouble() ?: 0.0
-            denom += 1.0
-        } else {
-            for (scale in 1..RADIUS) {
-                val position = ship.position.directionalOffset(it, scale)
-                val mapCell = gameMap.at(position)
-                val weight = RADIUS - scale + 1.0
-                num += weight * (mapCell?.halite?.toDouble() ?: 0.0)
-                denom += weight
-            }
-        }
-
-        val directionHalite = (num / denom).toInt()
-        val directionHaliteLevel = HaliteLevel.fromHalite(directionHalite)
-
-        directionHaliteLevel
-    }
     val shipyardDirections = gameMap.getUnsafeMoves(ship.position, shipyard.position)
     val nearestDropOffDirection = if (shipyardDirections.isEmpty()) Direction.STILL else shipyardDirections.first()
-    val nearestDropOffDistance = gameMap.calculateDistance(ship.position, shipyard.position)
-    val nearestDropOffProximity = DropOffProximity.fromDistance(nearestDropOffDistance)
+
     val shipHaliteLevel = HaliteLevel.fromHalite(ship.halite)
 
-    return State(directionHaliteLevels, nearestDropOffDirection, nearestDropOffProximity, shipHaliteLevel)
+    val cellHaliteLevel = HaliteLevel.fromHalite(gameMap.at(ship)?.halite ?: 0)
+
+    return State(twoByTwoRankedTiles, nearestDropOffDirection, shipHaliteLevel, cellHaliteLevel)
 }
 
 fun toCommand(ship: Ship, action: Action): Command {
@@ -395,7 +363,7 @@ object MyBot {
             actionValueFunction.loadState(agentStatePath)
         }
 
-        val agent = QLearner(random, 0.05, actionValueFunction)
+        val agent = QLearner(random, 0.01, actionValueFunction)
         var prevState: State? = null
         var prevAction = Action.STILL
         var prevHalite = 0
@@ -430,7 +398,7 @@ object MyBot {
             val currAction = agent.chooseAction(currState, currPossibleActions)
 
             if (prevState != null) {
-                val reward = currHalite - prevHalite - 1
+                val reward = currHalite - prevHalite
                 agent.learn(prevState, prevAction, reward.toDouble(), currState, currAction, currPossibleActions)
             }
 
