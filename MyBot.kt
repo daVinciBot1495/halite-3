@@ -169,12 +169,16 @@ class TableActionValueFunction(
     }
 
     override fun saveState(path: Path) {
-        val text = stateActionValueMap.map { (stateAction, value) ->
-            val keyStr = stateActionToStr(stateAction)
-            val valueStr = value.toString()
-            "$keyStr:$valueStr"
-        }.joinToString(separator = "\n")
-        path.toFile().writeText(text)
+        path.toFile().bufferedWriter().use { out ->
+            stateActionValueMap.forEach {
+                val keyStr = stateActionToStr(it.key)
+                val valueStr = it.value.toString()
+                out.write("$keyStr:$valueStr")
+                out.newLine()
+            }
+
+            out.flush()
+        }
     }
 
     override fun loadState(path: Path) {
@@ -305,15 +309,19 @@ class QLearner(
     }
 }
 
-fun toState(ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
-    val twoByTwoTileHaliteAvgs = twoByTwoTiles.map { tile ->
+fun toRankedTiles(ship: Ship, gameMap: GameMap, tiles: List<Tile>): List<RankedTile> {
+    val tileHaliteAvgs = tiles.map { tile ->
         val positions = tile.getPositionsForAnchor(ship.position)
         val haliteSum = positions.sumBy { gameMap.at(it)?.halite ?: 0 }
         Pair(tile, haliteSum.toDouble() / positions.size)
     }.toMutableList()
-    twoByTwoTileHaliteAvgs.sortBy { it.second }
-    val tileToRankMap = twoByTwoTileHaliteAvgs.mapIndexed { index, pair ->  pair.first to index }.toMap()
-    val twoByTwoRankedTiles = twoByTwoTiles.map { RankedTile(tileToRankMap[it]!!, it) }
+    tileHaliteAvgs.sortBy { it.second }
+    val tileToRankMap = tileHaliteAvgs.mapIndexed { index, pair ->  pair.first to index }.toMap()
+    return tiles.map { RankedTile(tileToRankMap[it]!!, it) }
+}
+
+fun toState(ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
+    val twoByTwoRankedTiles = toRankedTiles(ship, gameMap, twoByTwoTiles)
 
     val shipyardDirections = gameMap.getUnsafeMoves(ship.position, shipyard.position)
     val nearestDropOffDirection = if (shipyardDirections.isEmpty()) Direction.STILL else shipyardDirections.first()
