@@ -1,6 +1,6 @@
 package hlt
 
-class Position(val x: Int, val y: Int) {
+data class Position(val x: Int, val y: Int) {
 
     internal fun directionalOffset(d: Direction): Position {
         val dx: Int

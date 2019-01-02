@@ -5,6 +5,10 @@ import java.nio.file.Paths
 import java.util.Random
 import kotlin.collections.ArrayList
 
+const val NUM_AGENTS = 2
+
+val allDirections = setOf(Direction.STILL, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)
+
 val twoByTwoTiles = listOf(
         Tile("2.2.NW", TileRange(-1, 0), TileRange(-1,0)),
         Tile("2.2.NE", TileRange(0, 1), TileRange(-1, 0)),
@@ -87,7 +91,6 @@ sealed class Action {
         val SOUTH: Action = Move(Direction.SOUTH)
         val EAST: Action = Move(Direction.EAST)
         val WEST: Action = Move(Direction.WEST)
-        val ALL_ACTIONS = setOf(STILL, NORTH, SOUTH, EAST, WEST)
     }
 }
 
@@ -105,10 +108,6 @@ interface ActionValueFunction {
             nextState: State,
             nextAction: Action,
             possibleNextActions: Set<Action>)
-
-    fun saveState(path: Path)
-
-    fun loadState(path: Path)
 }
 
 class TableActionValueFunction(
@@ -149,11 +148,7 @@ class TableActionValueFunction(
             val oldVal = getValue(it.state, it.action)
             val oldTrace = getTrace(it.state, it.action)
             val newVal = oldVal + learningRate * temporalDiff * oldTrace
-            val newTrace = if (nextAction == nextOptimalAction) {
-                discountRate * traceDecayRate * oldTrace
-            } else {
-                0.0
-            }
+            val newTrace = if (nextAction == nextOptimalAction) discountRate * traceDecayRate * oldTrace else 0.0
 
             Log.log("Updating: s=${it.state}, a=${it.action}, oldVal=$oldVal, newVal=$newVal")
 
@@ -165,35 +160,6 @@ class TableActionValueFunction(
             Log.log("Clearing episode due to non-zero reward=$reward")
             episode.forEach { setTrace(it.state, it.action, 0.0) }
             episode.clear()
-        }
-    }
-
-    override fun saveState(path: Path) {
-        path.toFile().bufferedWriter().use { out ->
-            stateActionValueMap.forEach {
-                val keyStr = stateActionToStr(it.key)
-                val valueStr = it.value.toString()
-                out.write("$keyStr:$valueStr")
-                out.newLine()
-            }
-
-            out.flush()
-        }
-    }
-
-    override fun loadState(path: Path) {
-        path.toFile().forEachLine { line ->
-            val trimmedLine = line.trim()
-
-            if (trimmedLine.isNotEmpty()) {
-                val tokens = trimmedLine.split(":")
-                val keyStr = tokens[0]
-                val valueStr = tokens[1]
-                val stateActionPair = toStateAction(keyStr)
-                val value = valueStr.toDouble()
-
-                stateActionValueMap[stateActionPair] = value
-            }
         }
     }
 
@@ -215,6 +181,41 @@ class TableActionValueFunction(
     private fun setTrace(state: State, action: Action, value: Double) {
         val stateActionPair = StateAction(state, action)
         stateActionTraceMap[stateActionPair] = value
+    }
+}
+
+class ActionValueFunctionStore {
+    fun save(path: Path, stateActionValueMap: MutableMap<StateAction, Double>) {
+        path.toFile().bufferedWriter().use { out ->
+            stateActionValueMap.forEach {
+                val keyStr = stateActionToStr(it.key)
+                val valueStr = it.value.toString()
+                out.write("$keyStr:$valueStr")
+                out.newLine()
+            }
+
+            out.flush()
+        }
+    }
+
+    fun load(path: Path): MutableMap<StateAction, Double> {
+        val stateActionValueMap = mutableMapOf<StateAction, Double>()
+
+        path.toFile().forEachLine { line ->
+            val trimmedLine = line.trim()
+
+            if (trimmedLine.isNotEmpty()) {
+                val tokens = trimmedLine.split(":")
+                val keyStr = tokens[0]
+                val valueStr = tokens[1]
+                val stateActionPair = toStateAction(keyStr)
+                val value = valueStr.toDouble()
+
+                stateActionValueMap[stateActionPair] = value
+            }
+        }
+
+        return stateActionValueMap
     }
 
     private fun stateActionToStr(stateAction: StateAction): String {
@@ -268,10 +269,6 @@ interface ReinforcementLearner {
             nextState: State,
             nextAction: Action,
             possibleNextActions: Set<Action>)
-
-    fun saveState(path: Path)
-
-    fun loadState(path: Path)
 }
 
 class QLearner(
@@ -284,7 +281,7 @@ class QLearner(
         }
 
         return if (random.nextDouble() < explorationRate) {
-            Action.ALL_ACTIONS.toList()[random.nextInt(Action.ALL_ACTIONS.size)]
+            possibleNextActions.toList()[random.nextInt(possibleNextActions.size)]
         } else {
             actionValueFunction.max(currState, possibleNextActions)
         }
@@ -299,15 +296,9 @@ class QLearner(
             possibleNextActions: Set<Action>) {
         actionValueFunction.update(currState, action, reward, nextState, nextAction, possibleNextActions)
     }
-
-    override fun saveState(path: Path) {
-        actionValueFunction.saveState(path)
-    }
-
-    override fun loadState(path: Path) {
-        actionValueFunction.loadState(path)
-    }
 }
+
+class Context(val agent: ReinforcementLearner, var prevStateAction: StateAction?)
 
 fun toRankedTiles(ship: Ship, gameMap: GameMap, tiles: List<Tile>): List<RankedTile> {
     val tileHaliteAvgs = tiles.map { tile ->
@@ -339,17 +330,51 @@ fun toCommand(ship: Ship, action: Action): Command {
     }
 }
 
-fun toPossibleActions(ship: Ship, shipyard: Shipyard, gameMap: GameMap): Set<Action> {
+fun toNextPosition(ship: Ship, action: Action): Position {
+    return when (action) {
+        is Move -> ship.position.directionalOffset(action.direction)
+    }
+}
+
+fun toPossibleActions(ship: Ship, invalidNextPositions: Set<Position>, gameMap: GameMap): Set<Action> {
     val mapCell = gameMap.at(ship.position)
     val cellHalite = mapCell?.halite?.toDouble() ?: 0.0
 
     return if (ship.halite < cellHalite / 10) {
         setOf(Action.STILL)
-    } else if (ship.position == shipyard.position) {
-        setOf(Action.NORTH, Action.SOUTH, Action.EAST, Action.WEST)
     } else {
-        Action.ALL_ACTIONS
+        allDirections.mapNotNull {
+            if (invalidNextPositions.contains(ship.position.directionalOffset(it))) null else Move(it)
+        }.toSet()
     }
+}
+
+fun newContext(random: Random, stateActionValueMap: MutableMap<StateAction, Double>): Context {
+    val actionValueFunction = TableActionValueFunction(
+            0.99,
+            0.01,
+            0.9,
+            stateActionValueMap)
+    return Context(QLearner(random, 0.01, actionValueFunction), null)
+}
+
+fun getInvalidNextPositions(
+        shipId: EntityId,
+        shipyard: Shipyard,
+        currShipIds: Set<EntityId>,
+        currShipPositions: Map<EntityId, Position>,
+        nextShipPositions: Map<EntityId, Position>): Set<Position> {
+    return currShipIds.mapNotNull {
+        if (shipId == it) {
+            if (currShipPositions[it] == shipyard.position) {
+                shipyard.position
+            } else {
+                null
+            }
+        } else {
+            nextShipPositions[it] ?: currShipPositions[it]!!
+        }
+    }.toSet()
 }
 
 object MyBot {
@@ -363,17 +388,15 @@ object MyBot {
         // At this point "game" variable is populated with initial map data.
         // This is a good place to do computationally expensive start-up pre-processing.
         // As soon as you call "ready" function below, the 2 second per turn timer will start.
-        val agentStatePath = Paths.get("q.txt")
-        val actionValueFunction = TableActionValueFunction(0.9,0.01, 0.9)
-
-        if (Files.exists(agentStatePath)) {
-            Log.log("Loading agent state from ${agentStatePath.fileName}")
-            actionValueFunction.loadState(agentStatePath)
+        val actionValueFunctionPath = Paths.get("q.txt")
+        val actionValueFunctionStore = ActionValueFunctionStore()
+        val stateActionValueMap = if (Files.exists(actionValueFunctionPath)) {
+            Log.log("Loading agent state from ${actionValueFunctionPath.fileName}")
+            actionValueFunctionStore.load(actionValueFunctionPath)
+        } else {
+            mutableMapOf()
         }
-
-        val agent = QLearner(random, 0.01, actionValueFunction)
-        var prevState: State? = null
-        var prevAction = Action.STILL
+        val contextMap = mutableMapOf<EntityId, Context>()
         var prevHalite = 0
 
         game.ready("daVinciBot1495")
@@ -384,41 +407,72 @@ object MyBot {
             game.updateFrame()
 
             val me = game.me
+            val shipyard = me.shipyard
             val gameMap = game.gameMap
             val commandQueue = ArrayList<Command>()
-
-            me.shipyard
 
             //----------------------------------------------------------------------------------------------------------
             // Start Reinforcement Learning
             //----------------------------------------------------------------------------------------------------------
-            val ship = me.ships.values.firstOrNull()
+            val prevShipIds = contextMap.keys
+            val currShipIds = me.ships.keys
+            val removedShipIds = prevShipIds - currShipIds
+            val addedShipIds = currShipIds - prevShipIds
 
-            if (ship == null) {
-                commandQueue.add(me.shipyard.spawn())
-                game.endTurn(commandQueue)
-                continue
+            removedShipIds.forEach { contextMap.remove(it) }
+            addedShipIds.forEach {
+                contextMap[it] = newContext(random, stateActionValueMap)
             }
 
-            val currHalite = me.halite
-            val currState = toState(ship, me.shipyard, gameMap)
-            val currPossibleActions = toPossibleActions(ship, me.shipyard, gameMap)
-            val currAction = agent.chooseAction(currState, currPossibleActions)
+            val currShipPositions = me.ships.values.map { it.id to it.position }.toMap()
+            val nextShipPositions = mutableMapOf<EntityId, Position>()
 
-            if (prevState != null) {
-                val reward = currHalite - prevHalite
-                agent.learn(prevState, prevAction, reward.toDouble(), currState, currAction, currPossibleActions)
+            for (shipId in currShipIds) {
+                val invalidNextPositions = getInvalidNextPositions(
+                        shipId,
+                        shipyard,
+                        currShipIds,
+                        currShipPositions,
+                        nextShipPositions)
+
+                val ship = me.ships[shipId]!!
+                val context = contextMap[shipId]!!
+                val agent = context.agent
+
+                val currHalite = me.halite
+                val currState = toState(ship, shipyard, gameMap)
+                val currPossibleActions = toPossibleActions(ship, invalidNextPositions, gameMap)
+                val currAction = agent.chooseAction(currState, currPossibleActions)
+                val prevStateAction = context.prevStateAction
+
+                if (prevStateAction != null) {
+                    val reward = if (ship.position == shipyard.position) currHalite - prevHalite else 0
+                    agent.learn(
+                            prevStateAction.state,
+                            prevStateAction.action,
+                            reward.toDouble(),
+                            currState,
+                            currAction,
+                            currPossibleActions)
+                }
+
+                context.prevStateAction = StateAction(currState, currAction)
+                nextShipPositions[shipId] = toNextPosition(ship, currAction)
+                prevHalite = currHalite
+
+                commandQueue.add(toCommand(ship, currAction))
             }
 
-            prevState = currState
-            prevAction = currAction
-            prevHalite = currHalite
+            val anyNextPositionsInShipyard = nextShipPositions.any { it.value == shipyard.position }
 
-            commandQueue.add(toCommand(ship, currAction))
+            if (currShipIds.size < NUM_AGENTS && !anyNextPositionsInShipyard) {
+                Log.log("Spawning new ship")
+                commandQueue.add(shipyard.spawn())
+            }
 
             if (saveState && Constants.MAX_TURNS == game.turnNumber) {
-                Log.log("Saving state to ${agentStatePath.fileName}")
-                agent.saveState(agentStatePath)
+                Log.log("Saving state to ${actionValueFunctionPath.fileName}")
+                actionValueFunctionStore.save(actionValueFunctionPath, stateActionValueMap)
             } else {
                 Log.log("Not saving state")
             }
