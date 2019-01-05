@@ -3,9 +3,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.Random
+import kotlin.IllegalStateException
 import kotlin.collections.ArrayList
-
-const val NUM_AGENTS = 2
 
 val allDirections = setOf(Direction.STILL, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)
 
@@ -15,19 +14,21 @@ val twoByTwoTiles = listOf(
         Tile("2.2.SE", TileRange(0, 1), TileRange(0, 1)),
         Tile("2.2.SW", TileRange(-1, 0), TileRange(0, 1)))
 
+data class AgentId(val id: Int) {
+    init {
+        if (id < 0) throw IllegalArgumentException("id must be >= 0")
+    }
+}
+
 data class TileRange(val start: Int, val end: Int) {
     init {
-        if (end < start) {
-            throw IllegalArgumentException("start must be <= end")
-        }
+        if (end < start) throw IllegalArgumentException("start must be <= end")
     }
 }
 
 data class Tile(val id: String, val xRange: TileRange, val yRange: TileRange) {
     init {
-        if (id.isBlank()) {
-            throw IllegalArgumentException("id cannot be blank")
-        }
+        if (id.isBlank()) throw IllegalArgumentException("id cannot be blank")
     }
 
     fun getPositionsForAnchor(anchor: Position): List<Position> {
@@ -49,17 +50,13 @@ data class Tile(val id: String, val xRange: TileRange, val yRange: TileRange) {
 
 data class RankedTile(val rank: Int, val tile: Tile) {
     init {
-        if (rank < 0) {
-            throw IllegalArgumentException("rank must be >= 0")
-        }
+        if (rank < 0) throw IllegalArgumentException("rank must be >= 0")
     }
 }
 
 data class HaliteLevel(val rank: Int) {
     init {
-        if (rank < 0 || rank > THRESHOLDS.size) {
-            throw IllegalArgumentException("rank=$rank must be >= 0 and <= ${THRESHOLDS.size}")
-        }
+        if (rank < 0 || rank > THRESHOLDS.size) throw IllegalArgumentException("rank=$rank must be >= 0 and <= ${THRESHOLDS.size}")
     }
 
     companion object {
@@ -79,6 +76,7 @@ data class HaliteLevel(val rank: Int) {
 }
 
 data class State(
+        val agentId: AgentId,
         val twoByTwoRankedTiles: List<RankedTile>,
         val nearestDropOffDirection: Direction,
         val shipHaliteLevel: HaliteLevel,
@@ -87,10 +85,6 @@ data class State(
 sealed class Action {
     companion object {
         val STILL: Action = Move(Direction.STILL)
-        val NORTH: Action = Move(Direction.NORTH)
-        val SOUTH: Action = Move(Direction.SOUTH)
-        val EAST: Action = Move(Direction.EAST)
-        val WEST: Action = Move(Direction.WEST)
     }
 }
 
@@ -134,21 +128,22 @@ class TableActionValueFunction(
             nextState: State,
             nextAction: Action,
             possibleNextActions: Set<Action>) {
+        val terminal = reward != 0.0
         val stateActionVal = getValue(state, action)
-        val nextOptimalAction = max(nextState, possibleNextActions)
-        val nextOptimalStateActionVal = getValue(nextState, nextOptimalAction)
-        val temporalDiff = reward + discountRate * nextOptimalStateActionVal - stateActionVal
+        val nextStateActionVal = if (terminal) 0.0 else getValue(nextState, nextAction)
+        val temporalDiff = reward + discountRate * nextStateActionVal - stateActionVal
 
-        Log.log("s=$state, a=$action, r=$reward, s'=$nextState, a'=$nextAction, a*=$nextOptimalAction")
+        Log.log("s=$state, a=$action, r=$reward, s'=$nextState, a'=$nextAction")
 
-        setTrace(state, action, getTrace(state, action) + 1.0)
+        // Use a replacing trace
+        setTrace(state, action, 1.0)
 
         episode.add(StateAction(state, action))
         episode.forEach {
             val oldVal = getValue(it.state, it.action)
             val oldTrace = getTrace(it.state, it.action)
             val newVal = oldVal + learningRate * temporalDiff * oldTrace
-            val newTrace = if (nextAction == nextOptimalAction) discountRate * traceDecayRate * oldTrace else 0.0
+            val newTrace = discountRate * traceDecayRate * oldTrace
 
             Log.log("Updating: s=${it.state}, a=${it.action}, oldVal=$oldVal, newVal=$newVal")
 
@@ -156,8 +151,8 @@ class TableActionValueFunction(
             setTrace(it.state, it.action, newTrace)
         }
 
-        if (reward != 0.0) {
-            Log.log("Clearing episode due to non-zero reward=$reward")
+        if (terminal) {
+            Log.log("Clearing episode since next state is a terminal state")
             episode.forEach { setTrace(it.state, it.action, 0.0) }
             episode.clear()
         }
@@ -220,6 +215,7 @@ class ActionValueFunctionStore {
 
     private fun stateActionToStr(stateAction: StateAction): String {
         val state = stateAction.state
+        val agentIdStr = state.agentId.id.toString()
         val twoByTwoRankedTilesStr = rankedTilesToStr(state.twoByTwoRankedTiles)
         val nearestDropOffDirectionStr = state.nearestDropOffDirection.charValue
         val shipHaliteLevelStr = state.shipHaliteLevel.rank.toString()
@@ -229,7 +225,7 @@ class ActionValueFunctionStore {
             is Move -> action.direction.charValue
         }
 
-        return "$twoByTwoRankedTilesStr$nearestDropOffDirectionStr$shipHaliteLevelStr$cellHaliteLevelStr$actionStr"
+        return "$agentIdStr$twoByTwoRankedTilesStr$nearestDropOffDirectionStr$shipHaliteLevelStr$cellHaliteLevelStr$actionStr"
     }
 
     private fun rankedTilesToStr(rankedTiles: List<RankedTile>): String {
@@ -238,11 +234,12 @@ class ActionValueFunctionStore {
 
     private fun toStateAction(str: String): StateAction {
         var index = 0
+        val agentId = AgentId(str[index++].toString().toInt())
         val twoByTwoRankedTiles = twoByTwoTiles.map { RankedTile(str[index++].toString().toInt(), it) }
         val nearestDropOffDirection = toDirection(str[index++])
         val shipHaliteLevel = HaliteLevel(str[index++].toString().toInt())
         val cellHaliteLevel = HaliteLevel(str[index++].toString().toInt())
-        val state = State(twoByTwoRankedTiles, nearestDropOffDirection, shipHaliteLevel, cellHaliteLevel)
+        val state = State(agentId, twoByTwoRankedTiles, nearestDropOffDirection, shipHaliteLevel, cellHaliteLevel)
         val action = Move(toDirection(str[index++]))
         return StateAction(state, action)
     }
@@ -271,7 +268,7 @@ interface ReinforcementLearner {
             possibleNextActions: Set<Action>)
 }
 
-class QLearner(
+class SarsaLearner(
         private val random: Random,
         private val explorationRate: Double,
         private val actionValueFunction: ActionValueFunction) : ReinforcementLearner {
@@ -298,7 +295,54 @@ class QLearner(
     }
 }
 
-class Context(val agent: ReinforcementLearner, var prevStateAction: StateAction?)
+data class ContextId(val id: Int) {
+    init {
+        if (id < 0) throw IllegalArgumentException("id must be >= 0")
+    }
+}
+
+class Context(val contextId: ContextId, val agent: ReinforcementLearner, var prevStateAction: StateAction?)
+
+class ContextManager(
+        private val random: Random,
+        private val maxContextCount: Int,
+        private val stateActionValueMap: MutableMap<StateAction, Double>,
+        private val shipContextMap: MutableMap<EntityId, Context> = mutableMapOf()) {
+    fun hasContextAvailable(): Boolean {
+        return shipContextMap.size < maxContextCount
+    }
+
+    fun getShipIds(): Set<EntityId> {
+        return shipContextMap.keys
+    }
+
+    fun newContext(shipId: EntityId): Context {
+        val contextId = getNextContextId()
+        val actionValueFunction = TableActionValueFunction(0.99, 0.01, 0.9, stateActionValueMap)
+        val context = Context(contextId, SarsaLearner(random, 0.10, actionValueFunction),null)
+
+        shipContextMap[shipId] = context
+
+        Log.log("Created new context=${context.contextId} for shipId=$shipId")
+
+        return context
+    }
+
+    fun getContext(shipId: EntityId): Context {
+        return shipContextMap[shipId] ?: throw IllegalArgumentException("Context for shipId=$shipId not found")
+    }
+
+    fun releaseContext(shipId: EntityId) {
+        val context = shipContextMap.remove(shipId)
+        Log.log("Released context=${context?.contextId} for shipId=$shipId")
+    }
+
+    private fun getNextContextId(): ContextId {
+        val allContextIds = 0.until(maxContextCount).map { ContextId(it) }.toSet()
+        val takenContextIds = shipContextMap.map { it.value.contextId }.toSet()
+        return (allContextIds - takenContextIds).firstOrNull() ?: throw IllegalStateException("No new context ids available")
+    }
+}
 
 fun toRankedTiles(ship: Ship, gameMap: GameMap, tiles: List<Tile>): List<RankedTile> {
     val tileHaliteAvgs = tiles.map { tile ->
@@ -311,7 +355,9 @@ fun toRankedTiles(ship: Ship, gameMap: GameMap, tiles: List<Tile>): List<RankedT
     return tiles.map { RankedTile(tileToRankMap[it]!!, it) }
 }
 
-fun toState(ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
+fun toState(contextId: ContextId, ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
+    val agentId = AgentId(contextId.id)
+
     val twoByTwoRankedTiles = toRankedTiles(ship, gameMap, twoByTwoTiles)
 
     val shipyardDirections = gameMap.getUnsafeMoves(ship.position, shipyard.position)
@@ -321,7 +367,7 @@ fun toState(ship: Ship, shipyard: Shipyard, gameMap: GameMap): State {
 
     val cellHaliteLevel = HaliteLevel.fromHalite(gameMap.at(ship)?.halite ?: 0)
 
-    return State(twoByTwoRankedTiles, nearestDropOffDirection, shipHaliteLevel, cellHaliteLevel)
+    return State(agentId, twoByTwoRankedTiles, nearestDropOffDirection, shipHaliteLevel, cellHaliteLevel)
 }
 
 fun toCommand(ship: Ship, action: Action): Command {
@@ -330,9 +376,9 @@ fun toCommand(ship: Ship, action: Action): Command {
     }
 }
 
-fun toNextPosition(ship: Ship, action: Action): Position {
+fun toNextPosition(ship: Ship, action: Action, gameMap: GameMap): Position {
     return when (action) {
-        is Move -> ship.position.directionalOffset(action.direction)
+        is Move -> gameMap.normalize(ship.position.directionalOffset(action.direction))
     }
 }
 
@@ -344,18 +390,10 @@ fun toPossibleActions(ship: Ship, invalidNextPositions: Set<Position>, gameMap: 
         setOf(Action.STILL)
     } else {
         allDirections.mapNotNull {
-            if (invalidNextPositions.contains(ship.position.directionalOffset(it))) null else Move(it)
+            val nextPosition = gameMap.normalize(ship.position.directionalOffset(it))
+            if (invalidNextPositions.contains(nextPosition)) null else Move(it)
         }.toSet()
     }
-}
-
-fun newContext(random: Random, stateActionValueMap: MutableMap<StateAction, Double>): Context {
-    val actionValueFunction = TableActionValueFunction(
-            0.99,
-            0.01,
-            0.9,
-            stateActionValueMap)
-    return Context(QLearner(random, 0.01, actionValueFunction), null)
 }
 
 fun getInvalidNextPositions(
@@ -381,7 +419,7 @@ object MyBot {
     @JvmStatic
     fun main(args: Array<String>) {
         val rngSeed = System.nanoTime()
-        val saveState: Boolean = if (args.isNotEmpty()) args[0].toBoolean() else true
+        val isTraining =  args.isNotEmpty()
         val random = Random(rngSeed)
         val game = Game()
 
@@ -396,7 +434,7 @@ object MyBot {
         } else {
             mutableMapOf()
         }
-        val contextMap = mutableMapOf<EntityId, Context>()
+        val contextManager = ContextManager(random, 2, stateActionValueMap)
         var prevHalite = 0
 
         game.ready("daVinciBot1495")
@@ -414,15 +452,13 @@ object MyBot {
             //----------------------------------------------------------------------------------------------------------
             // Start Reinforcement Learning
             //----------------------------------------------------------------------------------------------------------
-            val prevShipIds = contextMap.keys
             val currShipIds = me.ships.keys
+            val prevShipIds = contextManager.getShipIds()
             val removedShipIds = prevShipIds - currShipIds
             val addedShipIds = currShipIds - prevShipIds
 
-            removedShipIds.forEach { contextMap.remove(it) }
-            addedShipIds.forEach {
-                contextMap[it] = newContext(random, stateActionValueMap)
-            }
+            removedShipIds.forEach { contextManager.releaseContext(it) }
+            addedShipIds.forEach { contextManager.newContext(it) }
 
             val currShipPositions = me.ships.values.map { it.id to it.position }.toMap()
             val nextShipPositions = mutableMapOf<EntityId, Position>()
@@ -436,11 +472,11 @@ object MyBot {
                         nextShipPositions)
 
                 val ship = me.ships[shipId]!!
-                val context = contextMap[shipId]!!
+                val context = contextManager.getContext(shipId)
                 val agent = context.agent
 
                 val currHalite = me.halite
-                val currState = toState(ship, shipyard, gameMap)
+                val currState = toState(context.contextId, ship, shipyard, gameMap)
                 val currPossibleActions = toPossibleActions(ship, invalidNextPositions, gameMap)
                 val currAction = agent.chooseAction(currState, currPossibleActions)
                 val prevStateAction = context.prevStateAction
@@ -456,8 +492,8 @@ object MyBot {
                             currPossibleActions)
                 }
 
+                nextShipPositions[shipId] = toNextPosition(ship, currAction, gameMap)
                 context.prevStateAction = StateAction(currState, currAction)
-                nextShipPositions[shipId] = toNextPosition(ship, currAction)
                 prevHalite = currHalite
 
                 commandQueue.add(toCommand(ship, currAction))
@@ -465,12 +501,12 @@ object MyBot {
 
             val anyNextPositionsInShipyard = nextShipPositions.any { it.value == shipyard.position }
 
-            if (currShipIds.size < NUM_AGENTS && !anyNextPositionsInShipyard) {
+            if (!anyNextPositionsInShipyard && contextManager.hasContextAvailable()) {
                 Log.log("Spawning new ship")
                 commandQueue.add(shipyard.spawn())
             }
 
-            if (saveState && Constants.MAX_TURNS == game.turnNumber) {
+            if (isTraining && Constants.MAX_TURNS == game.turnNumber) {
                 Log.log("Saving state to ${actionValueFunctionPath.fileName}")
                 actionValueFunctionStore.save(actionValueFunctionPath, stateActionValueMap)
             } else {
