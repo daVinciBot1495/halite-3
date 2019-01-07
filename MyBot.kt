@@ -60,7 +60,7 @@ data class HaliteLevel(val rank: Int) {
     }
 
     companion object {
-        private val THRESHOLDS = listOf(8, 16, 32, 64, 128, 256, 512)
+        private val THRESHOLDS = listOf(16, 32, 64, 128, 256, 512)
 
         fun fromHalite(halite: Int): HaliteLevel {
             val index = THRESHOLDS.binarySearch(halite)
@@ -434,7 +434,7 @@ object MyBot {
         } else {
             mutableMapOf()
         }
-        val contextManager = ContextManager(random, 2, stateActionValueMap)
+        val contextManager = ContextManager(random, 4, stateActionValueMap)
         var prevHalite = 0
 
         game.ready("daVinciBot1495")
@@ -499,9 +499,10 @@ object MyBot {
                 commandQueue.add(toCommand(ship, currAction))
             }
 
+            val hasEnoughHalite = me.halite > 1000
             val anyNextPositionsInShipyard = nextShipPositions.any { it.value == shipyard.position }
 
-            if (!anyNextPositionsInShipyard && contextManager.hasContextAvailable()) {
+            if (hasEnoughHalite && !anyNextPositionsInShipyard && contextManager.hasContextAvailable()) {
                 Log.log("Spawning new ship")
                 commandQueue.add(shipyard.spawn())
             }
